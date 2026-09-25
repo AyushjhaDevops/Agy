@@ -1,0 +1,19 @@
+cat > .gitignore <<'EOF'
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Environment and local data
+.env
+data/
+*.db
+
+# OS
+.DS_Store
+EOF
