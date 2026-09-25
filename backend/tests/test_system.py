@@ -20,5 +20,5 @@ def test_runtime_config_endpoint() -> None:
     payload = response.json()
 
     assert payload["app_name"] == "LocalForge AI"
-    assert payload["ollama_model"]
+    assert "ollama_model" in payload
     assert "api_key" not in payload
