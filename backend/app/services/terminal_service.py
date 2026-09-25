@@ -45,13 +45,13 @@ class CommandResult:
 
 
 class CommandApprovalRequired(PermissionError):
-    pass
+    """Raised when a high-risk command has not been approved."""
 
 
 class CommandPolicy:
-    _critical = {"sudo", "su", "doas", "mkfs", "fdisk", "parted", "cryptsetup", "pass", "gpg", "ssh-add"}
-    _high = {"rm", "rmdir", "unlink", "chmod", "chown", "chgrp", "git reset", "git clean", "git push --force", "dd"}
-    _medium = {"npm install", "npm i", "pip install", "pip3 install", "poetry install", "docker build", "docker compose build"}
+    _critical_commands = {"sudo", "su", "doas", "mkfs", "fdisk", "parted", "cryptsetup", "gpg", "ssh-add"}
+    _high_prefixes = ("rm", "rmdir", "unlink", "chmod", "chown", "chgrp", "git reset", "git clean", "git push --force", "dd")
+    _medium_prefixes = ("npm install", "npm i", "pip install", "pip3 install", "poetry install", "docker build", "docker compose build")
 
     def __init__(self, policy: ExecutionPolicy = ExecutionPolicy.RESTRICTED) -> None:
         self.policy = policy
@@ -62,11 +62,11 @@ class CommandPolicy:
             tokens = shlex.split(normalized)
         except ValueError:
             return CommandRisk.CRITICAL
-        if any(token in self._critical for token in tokens) or any(normalized.startswith(item) for item in self._critical):
+        if tokens and (tokens[0] in self._critical_commands or any(normalized.startswith(item + " ") or normalized == item for item in self._critical_commands)):
             return CommandRisk.CRITICAL
-        if any(normalized == item or normalized.startswith(item + " ") for item in self._high):
+        if any(normalized == item or normalized.startswith(item + " ") for item in self._high_prefixes):
             return CommandRisk.HIGH
-        if any(normalized == item or normalized.startswith(item + " ") for item in self._medium):
+        if any(normalized == item or normalized.startswith(item + " ") for item in self._medium_prefixes):
             return CommandRisk.MEDIUM
         if any(operator in normalized for operator in (";", "&&", "||", "|", ">", "<", "`", "$(`)):
             return CommandRisk.MEDIUM
@@ -78,11 +78,11 @@ class CommandPolicy:
             return CommandDecision(risk, True, False, "Explicit approval is required for high-risk commands")
         if self.policy == ExecutionPolicy.RESTRICTED and risk != CommandRisk.LOW:
             return CommandDecision(risk, False, False, "Restricted policy permits low-risk commands only")
-        return CommandDecision(risk, risk in {CommandRisk.HIGH, CommandRisk.CRITICAL}, True, "Allowed by execution policy")
+        return CommandDecision(risk, False, True, "Allowed by execution policy")
 
 
 class CommandExecutor:
-    """Async command runner; this is a policy gate, not OS-level sandboxing."""
+    """Async process runner and policy gate; it is not OS-level sandboxing."""
 
     def __init__(self, root: str, policy: ExecutionPolicy = ExecutionPolicy.RESTRICTED, timeout: float = 120.0) -> None:
         self.root = Path(root).expanduser().resolve()
@@ -100,79 +100,74 @@ class CommandExecutor:
 
     @staticmethod
     def _environment() -> dict[str, str]:
-        # Do not pass the complete parent environment to commands.
         allowed = {"PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR"}
         return {key: value for key, value in os.environ.items() if key in allowed}
 
-    async def stream(self, command: str, cwd: str | None = None, approved: bool = False, timeout: float | None = None, execution_id: str | None = None) -> AsyncIterator[tuple[str, str]]:
+    def _check(self, command: str, approved: bool) -> CommandDecision:
         decision = self.policy.decide(command, approved)
         if not decision.allowed:
             if decision.requires_approval:
                 raise CommandApprovalRequired(decision.reason)
             raise PermissionError(decision.reason)
+        return decision
+
+    async def stream(self, command: str, cwd: str | None = None, approved: bool = False, timeout: float | None = None, execution_id: str | None = None) -> AsyncIterator[tuple[str, str]]:
+        self._check(command, approved)
         process = await asyncio.create_subprocess_shell(command, cwd=str(self._cwd(cwd)), env=self._environment(), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         if execution_id:
             self.processes[execution_id] = process
-        async def read(stream: asyncio.StreamReader | None, channel: str) -> AsyncIterator[tuple[str, str]]:
-            if stream:
-                while True:
-                    line = await stream.readline()
-                    if not line:
-                        break
-                    yield channel, line.decode(errors="replace")
+        tasks = {asyncio.create_task(stream.readline()): channel for stream, channel in ((process.stdout, "stdout"), (process.stderr, "stderr")) if stream}
+        deadline = asyncio.get_running_loop().time() + (timeout or self.timeout)
         try:
-            async def collect() -> None:
-                async with asyncio.TaskGroup() as group:
-                    group.create_task(self._forward(read(process.stdout, "stdout")))
-                    group.create_task(self._forward(read(process.stderr, "stderr")))
-            # The public stream needs to yield live events, so consume both pipes fairly.
-            stdout_task = asyncio.create_task(process.stdout.readline()) if process.stdout else None
-            stderr_task = asyncio.create_task(process.stderr.readline()) if process.stderr else None
-            while stdout_task or stderr_task:
-                pending = [task for task in (stdout_task, stderr_task) if task]
-                done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            while tasks:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                done, _ = await asyncio.wait(tasks, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    raise asyncio.TimeoutError
                 for task in done:
+                    channel = tasks.pop(task)
                     line = task.result()
-                    channel = "stdout" if task is stdout_task else "stderr"
                     if line:
                         yield channel, line.decode(errors="replace")
-                        replacement = asyncio.create_task((process.stdout if channel == "stdout" else process.stderr).readline())
-                        if channel == "stdout": stdout_task = replacement
-                        else: stderr_task = replacement
-                    elif channel == "stdout": stdout_task = None
-                    else: stderr_task = None
-            await asyncio.wait_for(process.wait(), timeout=timeout or self.timeout)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
+                        stream = process.stdout if channel == "stdout" else process.stderr
+                        tasks[asyncio.create_task(stream.readline())] = channel
+            await asyncio.wait_for(process.wait(), max(0.01, deadline - asyncio.get_running_loop().time()))
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            await self._kill(process)
             raise
         finally:
-            self.processes.pop(execution_id or "", None)
+            for task in tasks:
+                task.cancel()
+            if execution_id and self.processes.get(execution_id) is process:
+                self.processes.pop(execution_id, None)
 
     async def execute(self, command: str, cwd: str | None = None, approved: bool = False, timeout: float | None = None, execution_id: str | None = None) -> CommandResult:
-        decision = self.policy.decide(command, approved)
-        if not decision.allowed:
-            if decision.requires_approval: raise CommandApprovalRequired(decision.reason)
-            raise PermissionError(decision.reason)
-        started = time.perf_counter(); out: list[str] = []; err: list[str] = []
+        decision = self._check(command, approved)
+        started = time.perf_counter()
+        stdout: list[str] = []
+        stderr: list[str] = []
         try:
             async for channel, text in self.stream(command, cwd, approved, timeout, execution_id):
-                (out if channel == "stdout" else err).append(text)
-            process_code = 0
-            if execution_id and execution_id in self.processes: process_code = await self.processes[execution_id].wait()
-            return CommandResult(command, str(self._cwd(cwd)), decision.risk, process_code, "".join(out), "".join(err), duration=time.perf_counter() - started)
+                (stdout if channel == "stdout" else stderr).append(text)
+            process = self.processes.get(execution_id or "")
+            return CommandResult(command, str(self._cwd(cwd)), decision.risk, process.returncode if process else 0, "".join(stdout), "".join(stderr), duration=time.perf_counter() - started)
         except asyncio.TimeoutError:
-            return CommandResult(command, str(self._cwd(cwd)), decision.risk, None, "".join(out), "".join(err), timed_out=True, duration=time.perf_counter() - started)
+            return CommandResult(command, str(self._cwd(cwd)), decision.risk, None, "".join(stdout), "".join(stderr), timed_out=True, duration=time.perf_counter() - started)
         except asyncio.CancelledError:
-            await self.cancel(execution_id) if execution_id else None
-            raise
+            await self.cancel(execution_id)
+            return CommandResult(command, str(self._cwd(cwd)), decision.risk, None, "".join(stdout), "".join(stderr), cancelled=True, duration=time.perf_counter() - started)
 
     async def cancel(self, execution_id: str | None) -> bool:
         process = self.processes.get(execution_id or "")
-        if not process or process.returncode is not None: return False
-        process.kill()
-        await process.wait()
+        if not process or process.returncode is not None:
+            return False
+        await self._kill(process)
         return True
 
-    async def _forward(self, stream: AsyncIterator[tuple[str, str]]) -> None:
-        async for _ in stream: pass
+    @staticmethod
+    async def _kill(process: asyncio.subprocess.Process) -> None:
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
