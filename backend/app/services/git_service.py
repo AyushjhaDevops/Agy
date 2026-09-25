@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,11 +54,14 @@ class GitService:
 
     def status(self) -> GitStatus:
         branch = self._run("rev-parse", "--abbrev-ref", "HEAD")
+        ahead = behind = 0
         try:
-            ahead_behind = self._run("rev-list", "--left-right", "--count", "@{u}...HEAD").split()
-            behind, ahead = int(ahead_behind[0]), int(ahead_behind[1])
-        except (IndexError, ValueError):
-            ahead = behind = 0
+            ahead_behind = self._run("rev-list", "--left-right", "--count", "@{u}...HEAD", check=False)
+            parts = ahead_behind.split()
+            if len(parts) == 2:
+                behind, ahead = int(parts[0]), int(parts[1])
+        except (IndexError, ValueError, RuntimeError):
+            pass
         porcelain = self._run("status", "--porcelain")
         modified = [line[3:] for line in porcelain.split("\n") if line.startswith(" M")]
         added = [line[3:] for line in porcelain.split("\n") if line.startswith("A ")]
@@ -70,20 +72,17 @@ class GitService:
     def diff(self, file: str | None = None) -> list[GitDiff]:
         if file:
             patch = self._run("diff", "HEAD", file)
-            insertions = patch.count("\n+") - 1
-            deletions = patch.count("\n-") - 1
+            insertions = sum(1 for line in patch.splitlines() if line.startswith("+") and not line.startswith("+++"))
+            deletions = sum(1 for line in patch.splitlines() if line.startswith("-") and not line.startswith("---"))
             return [GitDiff(file, insertions, deletions, patch)]
         diffs = []
         for diff_stat in self._run("diff", "--stat").split("\n"):
             if not diff_stat.strip() or "|" not in diff_stat:
                 continue
-            parts = diff_stat.split("|")
-            file_name = parts[0].strip()
-            changes = parts[1].split()
-            insertions = sum(1 for _ in changes if _ == "+")
-            deletions = sum(1 for _ in changes if _ == "-")
-            patch = self._run("diff", "HEAD", file_name)
-            diffs.append(GitDiff(file_name, insertions, deletions, patch))
+            file_name, change_summary = diff_stat.split("|", 1)
+            numbers = [int(value) for value in change_summary.split() if value.isdigit()]
+            patch = self._run("diff", "HEAD", file_name.strip())
+            diffs.append(GitDiff(file_name.strip(), numbers[0] if numbers else 0, 0, patch))
         return diffs
 
     def log(self, n: int = 20) -> list[GitCommit]:
@@ -106,10 +105,7 @@ class GitService:
         self._run("checkout", branch)
 
     def add(self, files: list[str] | None = None) -> None:
-        if files:
-            self._run("add", *files)
-        else:
-            self._run("add", "-A")
+        self._run("add", *(files if files else ("-A",)))
 
     def commit(self, message: str, approved: bool = False) -> str:
         if not approved:
