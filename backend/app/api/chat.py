@@ -62,11 +62,12 @@ async def chat(
 
 
 @router.websocket("/chat/stream")
-async def chat_stream(websocket: WebSocket) -> None:
+async def chat_stream(
+    websocket: WebSocket,
+    provider: OllamaProvider = Depends(get_provider),
+    store: ConversationStore = Depends(get_store),
+) -> None:
     await websocket.accept()
-    settings = get_settings()
-    provider = OllamaProvider(settings.ollama_base_url, settings.ollama_model, settings.ollama_timeout_seconds)
-    store = ConversationStore(settings.database_url)
     try:
         payload = ChatRequest.model_validate(await websocket.receive_json())
         conversation_id = store.ensure_conversation(payload.conversation_id, payload.project_id)
