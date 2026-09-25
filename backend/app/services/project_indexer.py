@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +61,8 @@ class ProjectIndexer:
         return root
 
     def _sort_tree(self, node: dict) -> None:
+        if node.get("kind") != "directory":
+            return
         node["children"].sort(key=lambda item: (item["kind"] != "directory", item["name"].lower()))
         for child in node["children"]:
             self._sort_tree(child)
@@ -107,7 +109,7 @@ class ProjectIndexer:
     def search(self, project: Project, query: str) -> list[dict]:
         if not query.strip():
             return []
-        rg = subprocess.run(["rg", "--line-number", "--column", "--no-heading", "--color", "never", "--fixed-strings", query, str(project.root)], capture_output=True, text=True, timeout=10, check=False) if __import__("shutil").which("rg") else None
+        rg = subprocess.run(["rg", "--line-number", "--column", "--no-heading", "--color", "never", "--fixed-strings", query, str(project.root)], capture_output=True, text=True, timeout=10, check=False) if shutil.which("rg") else None
         if rg is not None and rg.returncode in (0, 1):
             results = []
             for line in rg.stdout.splitlines()[:200]:
