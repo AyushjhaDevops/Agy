@@ -60,7 +60,6 @@ async def chat(
         conversation_id=conversation_id,
     )
 
-
 @router.websocket("/chat/stream")
 async def chat_stream(
     websocket: WebSocket,
@@ -68,25 +67,67 @@ async def chat_stream(
     store: ConversationStore = Depends(get_store),
 ) -> None:
     await websocket.accept()
+
     try:
         payload = ChatRequest.model_validate(await websocket.receive_json())
-        conversation_id = store.ensure_conversation(payload.conversation_id, payload.project_id)
+        conversation_id = store.ensure_conversation(
+            payload.conversation_id,
+            payload.project_id,
+        )
         history = store.get_messages(conversation_id)
-        store.add_message(conversation_id, "user", payload.message, payload.model)
+        store.add_message(
+            conversation_id,
+            "user",
+            payload.message,
+            payload.model,
+        )
+
         parts: list[str] = []
-        async for part in provider.stream(prompt_from_history(history, payload.message), payload.model):
+
+        async for part in provider.stream(
+            prompt_from_history(history, payload.message),
+            payload.model,
+        ):
             parts.append(part)
-            await websocket.send_json({"type": "token", "content": part})
+            await websocket.send_json({
+                "type": "token",
+                "content": part,
+            })
+
         answer = "".join(parts)
-        store.add_message(conversation_id, "assistant", answer, payload.model or provider.default_model)
-        await websocket.send_json({"type": "done", "conversation_id": conversation_id, "model": payload.model or provider.default_model})
+
+        store.add_message(
+            conversation_id,
+            "assistant",
+            answer,
+            payload.model or provider.default_model,
+        )
+
+        await websocket.send_json({
+            "type": "done",
+            "conversation_id": conversation_id,
+            "model": payload.model or provider.default_model,
+        })
+
     except WebSocketDisconnect:
         return
     except ModelNotFoundError as exc:
-        await websocket.send_json({"type": "error", "status": 404, "detail": str(exc)})
+        await websocket.send_json({
+            "type": "error",
+            "status": 404,
+            "detail": str(exc),
+        })
     except ProviderUnavailableError as exc:
-        await websocket.send_json({"type": "error", "status": 503, "detail": str(exc)})
+        await websocket.send_json({
+            "type": "error",
+            "status": 503,
+            "detail": str(exc),
+        })
     except Exception as exc:
-        await websocket.send_json({"type": "error", "status": 400, "detail": str(exc)})
+        await websocket.send_json({
+            "type": "error",
+            "status": 400,
+            "detail": str(exc),
+        })
     finally:
         await websocket.close()
