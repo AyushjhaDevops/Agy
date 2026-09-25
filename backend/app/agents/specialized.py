@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 from app.agents.base import BaseAgent
@@ -8,12 +7,11 @@ from app.services.model_provider import ModelProvider
 from app.services.task_models import Task
 
 
-@dataclass
 class SpecializedAgent(BaseAgent):
-    provider: ModelProvider
-    name: str
-    system_instructions: str
-    max_steps: int = 20
+    def __init__(self, provider: ModelProvider, name: str, system_instructions: str, max_steps: int = 20) -> None:
+        super().__init__(provider, max_steps=max_steps)
+        self.name = name
+        self.system_instructions = system_instructions
 
     async def plan(self, task: Task) -> list[str]:
         return [f"{self.name}: inspect task context", f"{self.name}: produce a focused result"]
