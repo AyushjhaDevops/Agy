@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import AsyncIterator
+from uuid import uuid4
 
 
 class CommandRisk(StrEnum):
@@ -162,14 +163,15 @@ class CommandExecutor:
         started = time.perf_counter()
         stdout: list[str] = []
         stderr: list[str] = []
+        internal_id = execution_id or str(uuid4())
         try:
-            async for channel, text in self.stream(command, cwd, approved, timeout, execution_id):
+            async for channel, text in self.stream(command, cwd, approved, timeout, internal_id):
                 (stdout if channel == "stdout" else stderr).append(text)
-            return CommandResult(command, str(self._cwd(cwd)), decision.risk, self.returncodes.pop(execution_id, 0) if execution_id else 0, "".join(stdout), "".join(stderr), duration=time.perf_counter() - started)
+            return CommandResult(command, str(self._cwd(cwd)), decision.risk, self.returncodes.pop(internal_id, 0), "".join(stdout), "".join(stderr), duration=time.perf_counter() - started)
         except asyncio.TimeoutError:
-            return CommandResult(command, str(self._cwd(cwd)), decision.risk, self.returncodes.pop(execution_id, None) if execution_id else None, "".join(stdout), "".join(stderr), timed_out=True, duration=time.perf_counter() - started)
+            return CommandResult(command, str(self._cwd(cwd)), decision.risk, self.returncodes.pop(internal_id, None), "".join(stdout), "".join(stderr), timed_out=True, duration=time.perf_counter() - started)
         except asyncio.CancelledError:
-            await self.cancel(execution_id)
+            await self.cancel(internal_id)
             raise
 
     async def cancel(self, execution_id: str | None) -> bool:
