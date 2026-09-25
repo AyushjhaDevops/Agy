@@ -1,0 +1,2 @@
+/* Phase 4 additions; preserve the Phase 3 visual language. */
+.task-input { width: 100%; min-height: 75px; resize: vertical; color: #e6edf3; background: #111a27; border: 1px solid #334155; border-radius: 6px; padding: 10px; margin-bottom: 8px; }.task-button { width: 100%; margin-bottom: 12px; }.diff-preview { max-height: 180px; overflow: auto; white-space: pre-wrap; background: #080c12; padding: 8px; font-size: 10px; }.phase4 .inspector { overflow-y: auto; }
