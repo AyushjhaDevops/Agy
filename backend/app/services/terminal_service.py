@@ -49,9 +49,9 @@ class CommandApprovalRequired(PermissionError):
 
 
 class CommandPolicy:
-    _critical_commands = {"sudo", "su", "doas", "mkfs", "fdisk", "parted", "cryptsetup", "gpg", "ssh-add"}
-    _high_prefixes = ("rm", "rmdir", "unlink", "chmod", "chown", "chgrp", "git reset", "git clean", "git push --force", "dd")
-    _medium_prefixes = ("npm install", "npm i", "pip install", "pip3 install", "poetry install", "docker build", "docker compose build")
+    _critical = {"sudo", "su", "doas", "mkfs", "fdisk", "parted", "cryptsetup", "pass", "gpg", "ssh-add"}
+    _high = {"rm", "rmdir", "unlink", "chmod", "chown", "chgrp", "git reset", "git clean", "git push --force", "dd"}
+    _medium = {"npm install", "npm i", "pip install", "pip3 install", "poetry install", "docker build", "docker compose build"}
 
     def __init__(self, policy: ExecutionPolicy = ExecutionPolicy.RESTRICTED) -> None:
         self.policy = policy
@@ -62,16 +62,14 @@ class CommandPolicy:
             tokens = shlex.split(normalized)
         except ValueError:
             return CommandRisk.CRITICAL
-        if tokens and (
-            tokens[0] in self._critical_commands
-            or any(normalized == item or normalized.startswith(item + " ") for item in self._critical_commands)
-        ):
+        if tokens and (tokens[0] in self._critical or any(normalized == item or normalized.startswith(item + " ") for item in self._critical)):
             return CommandRisk.CRITICAL
-        if any(normalized == item or normalized.startswith(item + " ") for item in self._high_prefixes):
+        if any(normalized == item or normalized.startswith(item + " ") for item in self._high):
             return CommandRisk.HIGH
-        if any(normalized == item or normalized.startswith(item + " ") for item in self._medium_prefixes):
+        if any(normalized == item or normalized.startswith(item + " ") for item in self._medium):
             return CommandRisk.MEDIUM
-        if any(operator in normalized for operator in (";", "&&", "||", "|", ">", "<", "`", "$(`)):
+        operators = (";", "&&", "||", "|", ">", "<", "`", "$" + "(")
+        if any(operator in normalized for operator in operators):
             return CommandRisk.MEDIUM
         return CommandRisk.LOW
 
