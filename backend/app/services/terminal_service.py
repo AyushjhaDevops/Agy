@@ -45,7 +45,7 @@ class CommandResult:
 
 
 class CommandApprovalRequired(PermissionError):
-    """Raised when a high-risk command has not been approved."""
+    """Raised when a high-risk command has not been explicitly approved."""
 
 
 class CommandPolicy:
@@ -62,7 +62,10 @@ class CommandPolicy:
             tokens = shlex.split(normalized)
         except ValueError:
             return CommandRisk.CRITICAL
-        if tokens and (tokens[0] in self._critical_commands or any(normalized.startswith(item + " ") or normalized == item for item in self._critical_commands)):
+        if tokens and (
+            tokens[0] in self._critical_commands
+            or any(normalized == item or normalized.startswith(item + " ") for item in self._critical_commands)
+        ):
             return CommandRisk.CRITICAL
         if any(normalized == item or normalized.startswith(item + " ") for item in self._high_prefixes):
             return CommandRisk.HIGH
@@ -82,13 +85,14 @@ class CommandPolicy:
 
 
 class CommandExecutor:
-    """Async process runner and policy gate; it is not OS-level sandboxing."""
+    """Async process runner and policy gate; this is not OS-level sandboxing."""
 
     def __init__(self, root: str, policy: ExecutionPolicy = ExecutionPolicy.RESTRICTED, timeout: float = 120.0) -> None:
         self.root = Path(root).expanduser().resolve()
         self.policy = CommandPolicy(policy)
         self.timeout = timeout
         self.processes: dict[str, asyncio.subprocess.Process] = {}
+        self.returncodes: dict[str, int | None] = {}
 
     def _cwd(self, cwd: str | None) -> Path:
         path = (self.root / cwd).resolve() if cwd else self.root
@@ -116,7 +120,11 @@ class CommandExecutor:
         process = await asyncio.create_subprocess_shell(command, cwd=str(self._cwd(cwd)), env=self._environment(), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         if execution_id:
             self.processes[execution_id] = process
-        tasks = {asyncio.create_task(stream.readline()): channel for stream, channel in ((process.stdout, "stdout"), (process.stderr, "stderr")) if stream}
+        tasks: dict[asyncio.Task[bytes], str] = {}
+        if process.stdout:
+            tasks[asyncio.create_task(process.stdout.readline())] = "stdout"
+        if process.stderr:
+            tasks[asyncio.create_task(process.stderr.readline())] = "stderr"
         deadline = asyncio.get_running_loop().time() + (timeout or self.timeout)
         try:
             while tasks:
@@ -132,10 +140,18 @@ class CommandExecutor:
                     if line:
                         yield channel, line.decode(errors="replace")
                         stream = process.stdout if channel == "stdout" else process.stderr
-                        tasks[asyncio.create_task(stream.readline())] = channel
-            await asyncio.wait_for(process.wait(), max(0.01, deadline - asyncio.get_running_loop().time()))
+                        if stream:
+                            tasks[asyncio.create_task(stream.readline())] = channel
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            await asyncio.wait_for(process.wait(), remaining)
+            if execution_id:
+                self.returncodes[execution_id] = process.returncode
         except (asyncio.TimeoutError, asyncio.CancelledError):
             await self._kill(process)
+            if execution_id:
+                self.returncodes[execution_id] = process.returncode
             raise
         finally:
             for task in tasks:
@@ -151,13 +167,12 @@ class CommandExecutor:
         try:
             async for channel, text in self.stream(command, cwd, approved, timeout, execution_id):
                 (stdout if channel == "stdout" else stderr).append(text)
-            process = self.processes.get(execution_id or "")
-            return CommandResult(command, str(self._cwd(cwd)), decision.risk, process.returncode if process else 0, "".join(stdout), "".join(stderr), duration=time.perf_counter() - started)
+            return CommandResult(command, str(self._cwd(cwd)), decision.risk, self.returncodes.pop(execution_id, 0) if execution_id else 0, "".join(stdout), "".join(stderr), duration=time.perf_counter() - started)
         except asyncio.TimeoutError:
-            return CommandResult(command, str(self._cwd(cwd)), decision.risk, None, "".join(stdout), "".join(stderr), timed_out=True, duration=time.perf_counter() - started)
+            return CommandResult(command, str(self._cwd(cwd)), decision.risk, self.returncodes.pop(execution_id, None) if execution_id else None, "".join(stdout), "".join(stderr), timed_out=True, duration=time.perf_counter() - started)
         except asyncio.CancelledError:
             await self.cancel(execution_id)
-            return CommandResult(command, str(self._cwd(cwd)), decision.risk, None, "".join(stdout), "".join(stderr), cancelled=True, duration=time.perf_counter() - started)
+            raise
 
     async def cancel(self, execution_id: str | None) -> bool:
         process = self.processes.get(execution_id or "")
