@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 import time
@@ -60,7 +59,7 @@ class BrowserAgent:
         evidence = BrowserEvidence()
         action_results: list[dict[str, Any]] = []
         started = time.perf_counter()
-        browser = context = page = None
+        result: BrowserTestResult
         try:
             try:
                 from playwright.async_api import async_playwright
@@ -81,21 +80,18 @@ class BrowserAgent:
                 visible = await page.locator("body").inner_text()
                 evidence.visible_errors.extend(re.findall(r"(?im)^.*(?:error|failed|failure|invalid).*$", visible))
                 status = "FAILED" if evidence.console_errors or evidence.network_failures or evidence.visible_errors else "COMPLETED"
-                return BrowserTestResult(test_id, url, status, action_results, evidence, duration=time.perf_counter() - started)
+                result = BrowserTestResult(test_id, url, status, action_results, evidence, duration=time.perf_counter() - started)
+                await context.close()
+                await browser.close()
         except Exception as exc:
-            if page is not None:
-                try:
-                    await self._record(page, evidence, evidence_dir)
-                except Exception:
-                    pass
-            return BrowserTestResult(test_id, url, "FAILED", action_results, evidence, str(exc), time.perf_counter() - started)
+            result = BrowserTestResult(test_id, url, "FAILED", action_results, evidence, str(exc), time.perf_counter() - started)
         finally:
             self._pages.pop(test_id, None)
-            if context is not None:
-                await context.close()
-            if browser is not None:
-                await browser.close()
-            (evidence_dir / "result.json").write_text(json.dumps(asdict(BrowserTestResult(test_id, url, "COMPLETED", action_results, evidence)), default=str, indent=2), encoding="utf-8")
+            result_payload = locals().get("result")
+            if result_payload is None:
+                result_payload = BrowserTestResult(test_id, url, "FAILED", action_results, evidence, "Browser test failed", time.perf_counter() - started)
+            (evidence_dir / "result.json").write_text(json.dumps(asdict(result_payload), default=str, indent=2), encoding="utf-8")
+        return result
 
     async def _action(self, page: Any, action: dict[str, Any], evidence: BrowserEvidence, evidence_dir: Path) -> dict[str, Any]:
         kind = action.get("type")
